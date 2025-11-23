@@ -2,9 +2,9 @@ name: Build, Push to GHCR and Artifacts
 
 on:
   push:
-    branches: [ "main" ]
-    tags: [ "v1" ]
-  workflow_dispatch:
+    branches: [ "main", "master" ] # 增加 master 以防万一
+    tags: [ "v*" ]
+  workflow_dispatch: # 允许手动运行
 
 env:
   REGISTRY: ghcr.io
@@ -15,13 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # 允许写入 GHCR
+      packages: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. 设置 QEMU (支持多架构构建)
+      # 1. 设置 QEMU
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -29,7 +29,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 3. 登录 GitHub Container Registry (GHCR)
+      # 3. 登录 GHCR
       - name: Log in to the Container registry
         uses: docker/login-action@v3
         with:
@@ -37,17 +37,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 4. 提取元数据 (自动处理标签和版本，强制转为小写)
+      # 4. 提取 Docker metadata (关键修改部分)
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # 下面的配置确保总是能生成标签
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'format("refs/heads/{0}", "main")' }}
+            # 规则1: 如果是 git tag (v1.0)，生成 :v1.0
             type=ref,event=tag
+            # 规则2: 总是为当前分支名生成标签 (例如 :main, :dev)
+            type=ref,event=branch
+            # 规则3: 如果是默认分支，额外生成 :latest
+            type=raw,value=latest,enable={{is_default_branch}}
 
-      # 5. 构建并推送到 GHCR (多架构: amd64, arm64)
+      # 5. 构建并推送到 GHCR
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v5
         with:
@@ -57,20 +62,19 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # 6. 额外构建: 导出为 tar 文件 (仅构建 amd64 用于离线调试/下载)
-      # 因为 docker load 不支持加载 multi-arch manifest，所以我们单独导出一个常用架构
+      # 6. 导出 tar 用于 Artifact (仅构建 amd64)
       - name: Build and export to local tar
         uses: docker/build-push-action@v5
         with:
           context: .
-          load: true # 加载到本地 Docker daemon
+          load: true
           tags: hlds-master:debug
           platforms: linux/amd64
 
       - name: Save Docker image to file
         run: docker save hlds-master:debug -o hlds-master-image.tar
 
-      # 7. 上传 Artifacts (在 GitHub Action 页面可下载)
+      # 7. 上传 Artifact
       - name: Upload Docker Image Artifact
         uses: actions/upload-artifact@v4
         with:
