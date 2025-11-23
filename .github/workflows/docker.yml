@@ -3,7 +3,7 @@ name: Build, Push to GHCR and Artifacts
 on:
   push:
     branches: [ "main" ]
-    tags: [ "v*" ]
+    tags: [ "latest" ]
   workflow_dispatch:
 
 env:
