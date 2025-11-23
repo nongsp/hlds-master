@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build, Push to GHCR and Artifacts
 
 on:
   push:
@@ -6,41 +6,74 @@ on:
     tags: [ "v*" ]
   workflow_dispatch:
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
-  build:
+  build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # 允许写入 GHCR
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 设置 QEMU 以支持多架构构建 (ARM, x86)
+      # 1. 设置 QEMU (支持多架构构建)
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      # 设置 Docker Buildx
+      # 2. 设置 Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 登录 Docker Hub
-      - name: Login to Docker Hub
+      # 3. 登录 GitHub Container Registry (GHCR)
+      - name: Log in to the Container registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 提取 Docker metadata (tags, labels)
+      # 4. 提取元数据 (自动处理标签和版本，强制转为小写)
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/hlds-master
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'format("refs/heads/{0}", "main")' }}
+            type=ref,event=tag
 
-      # 构建并推送
-      - name: Build and push Docker image
+      # 5. 构建并推送到 GHCR (多架构: amd64, arm64)
+      - name: Build and push multi-arch image
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # 6. 额外构建: 导出为 tar 文件 (仅构建 amd64 用于离线调试/下载)
+      # 因为 docker load 不支持加载 multi-arch manifest，所以我们单独导出一个常用架构
+      - name: Build and export to local tar
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true # 加载到本地 Docker daemon
+          tags: hlds-master:debug
+          platforms: linux/amd64
+
+      - name: Save Docker image to file
+        run: docker save hlds-master:debug -o hlds-master-image.tar
+
+      # 7. 上传 Artifacts (在 GitHub Action 页面可下载)
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hlds-master-image-tar
+          path: hlds-master-image.tar
+          retention-days: 5
