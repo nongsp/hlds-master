@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
-	"fmt"
 	"html/template"
 	"log"
 	"net"
@@ -161,6 +159,9 @@ func startCleanerAndQuery() {
 	ticker := time.NewTicker(30 * time.Second) // 每30秒检查一次
 	for range ticker.C {
 		manager.mu.Lock()
+		// 复制一份需要处理的服务器地址，释放锁后再去查询网络，防止阻塞
+		var checkList []string
+		
 		for addr, s := range manager.servers {
 			// 1. 删除超过 5 分钟未发送心跳的服务器
 			if time.Since(s.LastSeen) > 5*time.Minute {
@@ -168,17 +169,21 @@ func startCleanerAndQuery() {
 				log.Printf("Server removed (timeout): %s", addr)
 				continue
 			}
-			
-			// 2. 查询服务器详情 (A2S_INFO)
-			// 异步查询以免阻塞锁
-			go queryServerDetails(addr, s)
+			checkList = append(checkList, addr)
 		}
 		manager.mu.Unlock()
+
+		// 2. 查询服务器详情 (A2S_INFO) - 并发查询
+		for _, addr := range checkList {
+			go func(targetAddr string) {
+				queryServerDetails(targetAddr)
+			}(addr)
+		}
 	}
 }
 
-// queryServerDetails 发送 A2S_INFO 查询 (简易实现)
-func queryServerDetails(address string, s *ServerInfo) {
+// queryServerDetails 发送 A2S_INFO 查询
+func queryServerDetails(address string) {
 	conn, err := net.DialTimeout("udp", address, 3*time.Second)
 	if err != nil {
 		return
@@ -199,8 +204,6 @@ func queryServerDetails(address string, s *ServerInfo) {
 	// 解析简单的 GoldSrc/Source 响应 (跳过 Header)
 	buffer := bytes.NewBuffer(resp[5:]) // Skip FFFFFFFF + Header
 	
-	// 解析协议非常依赖版本，这里做简化通用处理读取字符串
-	// 注意：实际生产中建议使用 robust 的 A2S 库
 	readString := func(b *bytes.Buffer) string {
 		str, _ := b.ReadString(0x00)
 		if len(str) > 0 {
@@ -210,7 +213,13 @@ func queryServerDetails(address string, s *ServerInfo) {
 	}
 
 	// 协议格式通常为: Protocol, Name, Map, Folder, Game, ID, Players, MaxPlayers...
-	// GoldSrc 可能会有所不同，这里尝试通用解析
+	// 防止 buffer 溢出 panic
+	defer func() {
+		if r := recover(); r != nil {
+			// 忽略解析错误
+		}
+	}()
+
 	_ = buffer.Next(1) // Protocol version
 	name := readString(buffer)
 	mapName := readString(buffer)
@@ -218,6 +227,10 @@ func queryServerDetails(address string, s *ServerInfo) {
 	_ = readString(buffer) // Game
 	_ = buffer.Next(2)     // ID
 	
+	// 简单的长度检查
+	if buffer.Len() < 2 {
+		return
+	}
 	players := int(buffer.Next(1)[0])
 	maxPlayers := int(buffer.Next(1)[0])
 
