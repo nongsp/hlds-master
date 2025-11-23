@@ -1,0 +1,9 @@
+version: '3'
+services:
+  master:
+    image: your-dockerhub-user/hlds-master:latest
+    container_name: my-hlds-master
+    ports:
+      - "27010:27010/udp" # Master Server 协议端口
+      - "8080:8080"       # 网页查看端口
+    restart: always
